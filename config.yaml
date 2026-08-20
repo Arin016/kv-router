@@ -1,0 +1,28 @@
+# kv-router configuration
+listen_addr: ":8080"
+
+block_size: 64
+
+backends:
+  - id: "backend-1"
+    url: "http://localhost:11434"
+    cache_capacity_blocks: 512
+    health_check_interval: 5s
+    max_concurrent: 64
+
+  - id: "backend-2"
+    url: "http://localhost:11435"
+    cache_capacity_blocks: 512
+    health_check_interval: 5s
+    max_concurrent: 64
+
+  - id: "backend-3"
+    url: "http://localhost:11436"
+    cache_capacity_blocks: 512
+    health_check_interval: 5s
+    max_concurrent: 64
+
+scorer:
+  queue_depth_weight: 0.3
+  eviction_risk_weight: 0.3
+  cache_hit_weight: 0.4

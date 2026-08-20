@@ -1,0 +1,27 @@
+# Binaries
+/kv-router
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Go
+*.test
+*.out
+
+# UI
+web-ui/node_modules/
+web-ui/dist/
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*~
+
+# Secrets
+.env
+.env.*
+*.pem
+credentials.json
