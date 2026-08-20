@@ -1,0 +1,84 @@
+{
+  "title": "NOSTOS: CACHE-AWARE INFERENCE ROUTING",
+  "goal": "After seeing this diagram, a technical reader should understand how Nostos derives modeled prefix affinity, combines it with backend health and inflight work, owns capacity through the response body, commits observations only after successful outcomes, and separates the data plane from prompt-safe operations telemetry.",
+  "audience": "technical engineers operating OpenAI-compatible LLM inference fleets",
+  "format": "16:9 landscape, high resolution with four clearly separated horizontal lanes",
+  "lanes": [
+    {
+      "label": "1 · REQUEST IDENTITY",
+      "flows": [
+        "Client -> POST /v1/chat/completions -> 10 MiB bounded read -> routing envelope + original JSON bytes",
+        "routing envelope -> model + string messages + stream flag",
+        "role:content messages -> 64-byte chunks -> xxHash64 block sequence",
+        "model -> chat:<model> namespace",
+        "chat:<model> namespace + xxHash64 block sequence -> modeled prefix key"
+      ]
+    },
+    {
+      "label": "2 · ROUTE DECISION + ADMISSION",
+      "flows": [
+        "periodic /health probes -> healthy backend snapshot",
+        "modeled prefix key + bounded per-backend directory -> longest observed prefix per backend",
+        "healthy snapshot + prefix depth + inflight count + directory usage -> weighted scorer",
+        "no prefix anywhere -> least-inflight fallback -> selected backend",
+        "weighted scorer -> selected backend -> atomic TryReserve",
+        "TryReserve fails -> HTTP 429",
+        "TryReserve succeeds -> owned capacity slot"
+      ]
+    },
+    {
+      "label": "3 · FAITHFUL PROXY + OUTCOME",
+      "flows": [
+        "owned capacity slot + original JSON bytes -> preserve path + query + end-to-end headers -> inference backend",
+        "inference backend -> non-stream response status + body -> client",
+        "inference backend -> SSE body -> first response bytes -> flush chunks -> EOF -> client",
+        "non-stream status below 400 -> commit cumulative prefix observations",
+        "successful stream with response bytes -> commit cumulative prefix observations",
+        "connection error + 4xx/5xx + cancellation -> no commit",
+        "success + error + cancellation -> Release reservation"
+      ]
+    },
+    {
+      "label": "4 · DIRECTORY, OPERATIONS + SCALE BOUNDARY",
+      "flows": [
+        "commit cumulative prefix observations -> one backend-local namespace directory -> evict least recently observed key at capacity",
+        "route outcome -> sanitized bounded event ring -> /api/v1 overview + recent routes + Prometheus -> operator console",
+        "native engine token blocks + residency events -> stronger cache identity -> future directory reconciliation",
+        "multiple router replicas -> deterministic backend-group ownership -> aligned observation + routing"
+      ]
+    }
+  ],
+  "annotations": [
+    "RED WARNING beside modeled prefix key: byte-block evidence, not engine KV truth",
+    "RED WARNING beside directory usage: metadata bound, not GPU cache capacity",
+    "At inference transport: 30 s response-header timeout; request context owns total stream lifetime",
+    "At event ring: stores backend, match counts, score, queue, status, stream mode, first-byte timing; never messages or raw block keys",
+    "At readiness: /livez means process alive; /readyz means at least one healthy backend",
+    "At current admission: selection happens before reserve; a lost race returns 429; reserve-during-selection is the next contract"
+  ],
+  "loops": [
+    "commit cumulative prefix observations -> bounded per-backend directory -> influences the next request lookup, labeled outcome-gated learning"
+  ],
+  "exact_text": [
+    "POST /v1/chat/completions",
+    "modeled affinity ≠ cache guarantee",
+    "health first · locality ranks · reservation owns",
+    "no prompt content in telemetry",
+    "one source of directory truth",
+    "release exactly once"
+  ],
+  "footer": "Nostos routes on bounded evidence: preserve likely prefill work, but never confuse an observation with engine truth.",
+  "output_doodles": [
+    "a small client document at far left",
+    "three small GPU servers as the backend fleet",
+    "a tiny operator at the console in the final lane"
+  ],
+  "avoid": [
+    "brand logos",
+    "marketing performance multipliers",
+    "claiming byte chunks are token blocks",
+    "claiming directory usage equals GPU memory",
+    "crossed arrows",
+    "tiny unreadable prose"
+  ]
+}

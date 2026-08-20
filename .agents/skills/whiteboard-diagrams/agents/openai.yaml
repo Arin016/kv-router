@@ -1,0 +1,4 @@
+interface:
+  display_name: "Whiteboard Diagrams"
+  short_description: "Turn workflows into clear hand-drawn diagrams"
+  default_prompt: "Use $whiteboard-diagrams to turn my described workflow into a clear whiteboard diagram."

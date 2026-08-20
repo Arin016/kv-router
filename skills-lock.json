@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "skills": {
+    "whiteboard-diagrams": {
+      "source": "cneuralnetwork/diagrams",
+      "sourceType": "github",
+      "skillPath": "SKILL.md",
+      "computedHash": "7a69bc5a43b83423ddbf3a6558f0e5922b8f8067fde4def57880a4eb02a98687"
+    }
+  }
+}

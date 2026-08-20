@@ -1,0 +1,48 @@
+{
+  "title": "HOW MY TEXT-TO-IMAGE MODEL WORKS",
+  "goal": "Explain how a latent diffusion model learns to undo noise and later generates an image from random noise conditioned on text.",
+  "audience": "general curious audience",
+  "format": "16:9 landscape",
+  "lanes": [
+    {
+      "label": "TRAINING",
+      "flows": [
+        "caption -> CLIP -> text embedding",
+        "image -> VAE -> compressed image",
+        "compressed image + noise -> noisy image",
+        "text embedding + noisy image -> 100M U-NET -> predict the noise -> compare + improve"
+      ]
+    },
+    {
+      "label": "GENERATING",
+      "flows": [
+        "text prompt -> CLIP -> text embedding",
+        "random noise + text embedding -> 100M U-NET -> remove noise, step by step -> new image"
+      ]
+    }
+  ],
+  "annotations": [
+    "CLIP: frozen",
+    "VAE: frozen",
+    "100M U-NET: this learns"
+  ],
+  "loops": [
+    "compare + improve -> 100M U-NET, labeled repeat"
+  ],
+  "exact_text": [
+    "frozen",
+    "this learns",
+    "repeat",
+    "remove noise, step by step",
+    "new image"
+  ],
+  "footer": "Train it to undo noise. Then start from noise and let it draw.",
+  "output_doodles": [
+    "a charming tiny fox-and-tree finished image labeled new image"
+  ],
+  "avoid": [
+    "equations",
+    "photorealism",
+    "brand logos"
+  ]
+}

@@ -25,3 +25,4 @@ web-ui/dist/
 .env.*
 *.pem
 credentials.json
+.vercel

@@ -1,68 +1,83 @@
-# kv-router
+# Nostos · kv-router
 
-A KV-cache-aware request router for LLM inference backends. Routes incoming chat completion requests to the backend most likely to have relevant prefix blocks already cached, minimizing redundant KV-cache computation and improving throughput.
+**Route each conversation to the GPU that already holds its prefix.**
+
+Nostos (νόστος — *homecoming*) is a KV-cache-aware router for LLM inference fleets. It sits in front of vLLM, TGI, or any OpenAI-compatible backend, estimates which worker has already processed the longest part of a request, and routes with both cache locality and current load in view.
+
+| | |
+|---|---|
+| **Live site** | [kv-router.vercel.app](https://kv-router.vercel.app) |
+| **GitHub** | [github.com/Arin016/kv-router](https://github.com/Arin016/kv-router) |
+| **Binary** | `kv-router` (Go) |
+| **UI** | React + Vite in `web-ui/` |
+
+The [live demo](https://kv-router.vercel.app) is the marketing site and routing arena — interactive policy comparison, engineering notes, and research. The **console** (`/dashboard`) needs a running `kv-router` process for live API data.
+
+---
+
+## Why this exists
+
+Follow-up chat turns repeat almost the entire conversation. If that prefix is still resident in a backend's KV cache, prefill work can be skipped or reduced. A plain load balancer ignores that — it rotates, hashes sessions, or picks the shortest queue.
+
+Nostos asks a different question: **which healthy backend already observed this prefix?**
+
+It then atomically reserves capacity, proxies the stream, and records bounded affinity evidence — without storing prompts.
+
+---
 
 ## Architecture
 
 ```
-                         ┌─────────────────────────────────────┐
-                         │            kv-router                │
-                         │                                     │
-  OpenAI-compat  ──────▶ │  ┌───────────┐   ┌──────────────┐  │
-  /v1/chat/completions   │  │  Block     │──▶│  Radix Tree  │  │
-                         │  │  Hasher    │   │  (prefix     │  │
-                         │  │  (xxhash)  │   │   index)     │  │
-                         │  └───────────┘   └──────┬───────┘  │
-                         │                         │           │
-                         │                         ▼           │
-                         │  ┌──────────────────────────────┐   │
-                         │  │         Scorer               │   │
-                         │  │  cache_hit * w1              │   │
-                         │  │  - queue_depth * w2          │   │
-                         │  │  - eviction_risk * w3        │   │
-                         │  └──────────────┬───────────────┘   │
-                         │                 │                    │
-                         └─────────────────┼────────────────────┘
-                                           │
-                         ┌─────────────────┼────────────────────┐
-                         │                 ▼                     │
-                         │  ┌──────────┐ ┌──────────┐ ┌──────┐ │
-                         │  │Backend A │ │Backend B │ │ ...  │ │
-                         │  │(vLLM/TGI)│ │(vLLM/TGI)│ │      │ │
-                         │  └──────────┘ └──────────┘ └──────┘ │
-                         │         Backend Pool                 │
-                         └──────────────────────────────────────┘
+  Client                    Nostos (kv-router)                 Backends
+  ──────                    ──────────────────                 ────────
+  POST /v1/chat/completions
+        ──────────────────▶  hash prefix blocks
+                             radix-tree lookup (per backend)
+                             score: cache hit − queue − pressure
+                             atomic reserve slot
+        ◀──────────────────  proxy stream
+                             observe outcome (no prompt body)
 ```
 
-## Quick Start
+**Hot path:** inspect → match longest observed prefix → reserve → forward → release on EOF/error/cancel.
 
-### Build
+**Four rules:**
+1. **Scope** — cache identity is model + tokenizer + template + adapter + tenant, not text alone
+2. **Admit** — health and free capacity filter first; locality only ranks eligible backends
+3. **Hold** — reservations outlive response headers until the stream ends
+4. **Explain** — telemetry records backend, match depth, score, TTFT — never the prompt
+
+---
+
+## Quick start (self-host)
+
+### 1. Build
 
 ```bash
-cd /path/to/kv-router
+git clone https://github.com/Arin016/kv-router.git
+cd kv-router
+
 cd web-ui && npm install && npm run build && cd ..
 go build -o kv-router ./cmd/kv-router
 ```
 
-The compiled React application is served by the router at `/`, with product,
-engineering, research, and command-center routes at `/`, `/engineering`,
-`/research`, and `/dashboard`.
+The UI is embedded from `site/web/` and served by the router at `/`.
 
-### Configure
+### 2. Configure
 
-Create `config.yaml`:
+`config.yaml`:
 
 ```yaml
 listen_addr: ":8080"
 block_size: 64
 
 backends:
-  - id: vllm-0
-    url: http://localhost:8000
+  - id: gpu-a
+    url: http://10.0.0.11:8000
     cache_capacity_blocks: 4096
     health_check_interval: 10s
-  - id: vllm-1
-    url: http://localhost:8001
+  - id: gpu-b
+    url: http://10.0.0.12:8000
     cache_capacity_blocks: 4096
     health_check_interval: 10s
 
@@ -72,78 +87,101 @@ scorer:
   eviction_risk_weight: 0.3
 ```
 
-### Run
+### 3. Run
 
 ```bash
 ./kv-router --config ./config.yaml
-
-# Override listen address:
-./kv-router --config ./config.yaml --listen :9090
 ```
 
-The router exposes:
-- `POST /v1/chat/completions` — OpenAI-compatible routing endpoint
-- `GET /livez` — process liveness
-- `GET /readyz` (or `/health`) — readiness; succeeds only when a backend is healthy
-- `GET /api/v1/overview` — UI-facing fleet and cache summary
-- `GET /api/v1/backends` — backend health and inflight requests
-- `GET /api/v1/cache` — bounded cache-directory usage
-- `GET /metrics` — Prometheus endpoint (expanded metrics are in progress)
+| Endpoint | Purpose |
+|----------|---------|
+| `POST /v1/chat/completions` | OpenAI-compatible routing |
+| `GET /livez` | Process liveness |
+| `GET /readyz` | Ready when at least one backend is healthy |
+| `GET /api/v1/overview` | Fleet + cache summary (console) |
+| `GET /api/v1/backends` | Per-backend health and inflight |
+| `GET /api/v1/cache` | Bounded residency directory |
+| `GET /metrics` | Prometheus (expanding) |
 
-## How It Works
+Open **http://localhost:8080** for the product site and **http://localhost:8080/dashboard** for the live console.
 
-### Block Hashing
+### Local UI dev (hot reload)
 
-Incoming chat messages are concatenated (role-prefixed) and split into fixed-size blocks (default 64 chars). Each block is hashed with xxhash to produce a sequence of `uint64` digests. This sequence is the "prefix fingerprint" of the request.
+```bash
+cd web-ui && npm run dev
+# → http://localhost:5174  (proxies /api to :8080)
+```
 
-### Radix Tree Lookup
+---
 
-The router maintains a radix tree keyed by block hash sequences. When a request arrives, its hash sequence is traversed down the tree. Nodes at each depth record which backends have previously served prefixes at that length. The lookup returns `{backend_id: matched_blocks}` — how deep each backend's cache alignment goes.
+## How routing works
+
+### Prefix fingerprint
+
+Chat messages are concatenated (role-prefixed) and split into fixed-size blocks (default 64 chars). Each block is hashed (xxhash). The sequence is the request's prefix fingerprint.
+
+### Radix tree
+
+A radix tree keyed by block-hash sequences records which backends have served prefixes at each depth. Lookup returns `{backend_id: matched_blocks}`.
 
 ### Scoring
 
-Each healthy backend is scored:
-
 ```
-score = (matched_blocks / total_blocks) × cache_hit_weight
-      − (queue_depth / max_queue_depth) × queue_depth_weight
+score = (matched / total) × cache_hit_weight
+      − (queue_depth / max) × queue_depth_weight
       − eviction_risk × eviction_risk_weight
 ```
 
-Where `eviction_risk = 1 − (blocks_remaining / total_capacity)`.
+Highest eligible score wins. No match → least-loaded fallback.
 
-The highest-scoring backend wins. If no backend has any cache match, the router falls back to least-loaded routing (lowest queue depth).
+### After dispatch
 
-### After Routing
+1. Record hash sequence for the chosen backend (bounded LRU eviction)
+2. Proxy request; hold reservation until stream completes
+3. Emit sanitized decision event (no prompt content)
 
-Once a backend is selected, the router:
-1. Records the request's hash sequence in the radix tree for that backend (for future affinity)
-2. Proxies the request to the backend
-3. Tracks queue depth changes for scoring
+---
+
+## Project layout
+
+```
+cmd/kv-router/          # entrypoint
+internal/
+  api/                  # HTTP handlers + static UI
+  backend/              # pool, proxy, health
+  cacheindex/           # residency directory
+  radixtree/            # prefix index
+  scorer/               # scheduling policy
+web-ui/                 # Nostos marketing + console (React)
+site/web/               # Vite build output (also Vercel deploy root)
+```
+
+---
+
+## Deploy UI to Vercel
+
+The marketing site deploys as a static SPA from `site/web/`:
+
+```bash
+# from repo root — vercel.json is already configured
+npx vercel --prod
+```
+
+`vercel.json` builds `web-ui/`, outputs to `site/web/`, and rewrites `/engineering`, `/research`, and `/dashboard` to `index.html`.
+
+> **Note:** Vercel hosts the UI only. Run `kv-router` separately for the OpenAI endpoint and live console API.
+
+---
 
 ## Benchmarks
-
-_TODO: Add benchmarks for routing latency, cache-directory operations, and end-to-end throughput. Do not treat cache-affinity estimates as measured backend KV residency until an engine adapter supplies native cache metadata._
 
 ```bash
 go test -bench=. ./...
 ```
 
-## Design Decisions
+End-to-end prefill savings under shared-prefix workloads are the benchmark that matters — not router microseconds alone. See [Engineering → Validation](https://kv-router.vercel.app/engineering#evaluation).
 
-1. **xxhash over SHA/crypto** — We need speed, not collision resistance. xxhash gives ~10 GB/s throughput on modern CPUs. Prefix matching only needs "probably equal" semantics.
-
-2. **Fixed block size** — Simpler than variable-length chunking. The 64-char default balances granularity (catches most system prompt reuse) against tree depth explosion.
-
-3. **Radix tree over hash map** — Captures partial prefix matches. A backend that has 80% of your prefix cached is still better than one with 0%, even if it doesn't have the full prefix. Flat hash maps can't express "longest common prefix."
-
-4. **Separate eviction tracking from tree structure** — The tree records what was sent where. Eviction (LRU) happens per-backend based on `LastAccess` timestamps. This decouples the index from backend memory management.
-
-5. **RWMutex on tree** — Read-heavy workload (many lookups per insert). Reader starvation is unlikely given the short critical sections. Sharding or lock-free approaches are future optimizations if contention appears.
-
-6. **No external dependencies for CLI** — `flag` package keeps the binary small and startup instant. A router should have sub-millisecond cold start.
-
-7. **Scorer weights are configurable** — Different deployments have different bottlenecks. A cluster with homogeneous backends cares more about cache hits; a heterogeneous cluster may weight queue depth higher.
+---
 
 ## License
 

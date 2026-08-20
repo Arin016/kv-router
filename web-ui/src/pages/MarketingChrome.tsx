@@ -78,7 +78,10 @@ export default function MarketingChrome({ children, active = "product" }: Props)
             </a>
             <p className="mkt-footer-tag">
               Nostos (νόστος): homecoming. The locality layer for LLM inference — send the request
-              back to the GPU that already remembers it.
+              back to the GPU that already remembers it.{" "}
+              <a href="https://kv-router.vercel.app" target="_blank" rel="noreferrer">
+                Live demo →
+              </a>
             </p>
           </div>
           <nav className="mkt-footer-links" aria-label="Footer">
