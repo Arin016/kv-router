@@ -85,29 +85,42 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
-	// --- 5. Score and select backend ---
+	// --- 5. Rank backends, reserve in order ---
+	// Scoring sees a snapshot; by reserve time the winner may be full.
+	// Walk the ranking and take the first backend that is still healthy
+	// and reserves, so one contended winner can't fail the request while
+	// capacity sits idle elsewhere. Fixes #1.
 	routeReq := &scorer.Request{
 		BlockHashes: prefixHashes,
 		TotalBlocks: totalBlocks,
 	}
-	selectedID := s.scorer.Route(routeReq, states)
-	if selectedID == "" {
-		writeError(w, http.StatusServiceUnavailable, "scorer could not select a backend")
-		return
-	}
-
-	selectedBackend := s.pool.Get(selectedID)
-	if selectedBackend == nil {
-		writeError(w, http.StatusInternalServerError, "selected backend not found in pool")
-		return
-	}
-	selectedState := scorer.BackendState{ID: selectedID}
-	for _, state := range states {
-		if state.ID == selectedID {
-			selectedState = state
-			break
+	ranked := s.scorer.Rank(routeReq, states)
+	var selectedBackend *backend.Backend
+	var selectedState scorer.BackendState
+	selectedID := ""
+	for _, candidate := range ranked {
+		b := s.pool.Get(candidate.ID)
+		if b == nil || !b.IsHealthy() {
+			continue
 		}
+		if !b.TryReserve() {
+			continue
+		}
+		selectedBackend = b
+		selectedID = candidate.ID
+		selectedState = candidate
+		break
 	}
+	if selectedBackend == nil {
+		if len(ranked) == 0 {
+			writeError(w, http.StatusServiceUnavailable, "scorer could not select a backend")
+		} else {
+			writeError(w, http.StatusTooManyRequests, "all backends are at capacity")
+		}
+		return
+	}
+	// The reservation is held for the full response lifetime.
+	defer selectedBackend.Release()
 	selectedScore := s.scorer.Score(routeReq, &selectedState)
 
 	slog.Debug("routed request",
@@ -117,14 +130,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		"model", req.Model,
 	)
 
-	// --- 6. Atomically reserve capacity before forwarding ---
-	if !selectedBackend.TryReserve() {
-		writeError(w, http.StatusTooManyRequests, "selected backend is at capacity")
-		return
-	}
-	defer selectedBackend.Release()
-
-	// --- 7. Forward to backend ---
+	// --- 6. Forward to backend (reservation already held) ---
 	w.Header().Set(headerBackend, selectedID)
 
 	if req.Stream {
