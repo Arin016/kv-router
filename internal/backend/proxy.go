@@ -49,7 +49,7 @@ func ForwardStream(ctx context.Context, backend *Backend, body []byte, path stri
 		return nil, err
 	}
 	defer resp.Body.Close()
-	copyHeaders(w.Header(), resp.Header)
+	CopyHeaders(w.Header(), resp.Header)
 	w.WriteHeader(resp.StatusCode)
 	if resp.StatusCode >= http.StatusBadRequest {
 		_, err := io.Copy(w, resp.Body)
@@ -103,7 +103,10 @@ func forwardHeaders(in http.Header) http.Header {
 	return out
 }
 
-func copyHeaders(dst, src http.Header) {
+// CopyHeaders copies response headers downstream, stripping hop-by-hop
+// headers that must never be forwarded (Connection, Transfer-Encoding, …).
+// Shared by the streaming and non-streaming forward paths. Fixes #2.
+func CopyHeaders(dst, src http.Header) {
 	for key, values := range src {
 		if isHopByHop(key) {
 			continue

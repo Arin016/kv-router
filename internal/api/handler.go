@@ -163,12 +163,8 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		}
 		defer resp.Body.Close()
 
-		// Copy response headers.
-		for k, vals := range resp.Header {
-			for _, v := range vals {
-				w.Header().Add(k, v)
-			}
-		}
+		// Copy upstream headers without hop-by-hop framing headers.
+		backend.CopyHeaders(w.Header(), resp.Header)
 		w.WriteHeader(resp.StatusCode)
 		_, _ = io.Copy(w, resp.Body)
 		if resp.StatusCode < http.StatusBadRequest {
