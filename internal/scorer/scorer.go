@@ -1,6 +1,9 @@
 package scorer
 
-import "math"
+import (
+	"math"
+	"sort"
+)
 
 // Request represents an incoming routing request with the block hashes it needs.
 type Request struct {
@@ -21,9 +24,9 @@ type BackendState struct {
 
 // Weights holds the tunable scoring weights.
 type Weights struct {
-	CacheHit      float64
-	QueueDepth    float64
-	EvictionRisk  float64
+	CacheHit     float64
+	QueueDepth   float64
+	EvictionRisk float64
 }
 
 // DefaultWeights returns sensible defaults.
@@ -124,6 +127,47 @@ func (s *Scorer) Route(req *Request, backends []BackendState) string {
 	}
 
 	return bestID
+}
+
+// Rank orders healthy backends for selection: by score desc when any
+// backend holds cache affinity, otherwise by queue depth asc (pure load
+// balancing). The handler reserves in this order so a contended winner
+// falls through to the next candidate instead of failing the request.
+// Ties resolve by backend ID for determinism.
+func (s *Scorer) Rank(req *Request, backends []BackendState) []BackendState {
+	healthy := make([]BackendState, 0, len(backends))
+	for _, b := range backends {
+		if b.Healthy {
+			healthy = append(healthy, b)
+		}
+	}
+	anyCacheHit := false
+	for i := range healthy {
+		if healthy[i].MatchedBlocks > 0 {
+			anyCacheHit = true
+			break
+		}
+	}
+	if anyCacheHit {
+		scores := make(map[string]float64, len(healthy))
+		for i := range healthy {
+			scores[healthy[i].ID] = s.Score(req, &healthy[i])
+		}
+		sort.SliceStable(healthy, func(i, j int) bool {
+			if scores[healthy[i].ID] == scores[healthy[j].ID] {
+				return healthy[i].ID < healthy[j].ID
+			}
+			return scores[healthy[i].ID] > scores[healthy[j].ID]
+		})
+		return healthy
+	}
+	sort.SliceStable(healthy, func(i, j int) bool {
+		if healthy[i].QueueDepth == healthy[j].QueueDepth {
+			return healthy[i].ID < healthy[j].ID
+		}
+		return healthy[i].QueueDepth < healthy[j].QueueDepth
+	})
+	return healthy
 }
 
 // leastLoaded returns the ID of the healthy backend with the lowest queue depth.
