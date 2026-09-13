@@ -22,7 +22,10 @@ type BackendConfig struct {
 	URL                 string
 	CacheCapacityBlocks int
 	HealthCheckInterval time.Duration
-	MaxConcurrent       int
+	// MaxConcurrent is the maximum active requests accepted by this backend.
+	// 0 means DefaultMaxConcurrent. Negative values are rejected by config
+	// validation and defaulted defensively by NewPool for direct callers.
+	MaxConcurrent int
 }
 
 // Backend represents a single downstream KV-cache inference backend.
@@ -52,8 +55,10 @@ func (b *Backend) MaxConcurrent() int {
 	return int(b.maxConcurrent)
 }
 
-// TryReserve atomically reserves capacity for one request. A non-positive
-// limit means the backend is unconstrained.
+// TryReserve atomically reserves capacity for one request. Backends built by
+// NewPool always carry a positive limit (0 input means DefaultMaxConcurrent),
+// so TryReserve enforces that limit. A zero-value Backend constructed without
+// NewPool has a non-positive limit and is treated as unconstrained.
 func (b *Backend) TryReserve() bool {
 	for {
 		current := b.queueDepth.Load()
@@ -84,6 +89,9 @@ type Snapshot struct {
 }
 
 // NewPool constructs a Pool from the provided backend configurations.
+// A MaxConcurrent of 0 means DefaultMaxConcurrent; negative values are
+// invalid (rejected by config validation) and defaulted defensively here so
+// direct callers cannot create a zero-limit backend.
 // Each backend starts as healthy; the caller should invoke StartHealthChecks
 // to begin continuous liveness probing.
 func NewPool(configs []BackendConfig) *Pool {

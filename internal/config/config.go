@@ -47,6 +47,7 @@ type BackendConfig struct {
 	HealthCheckInterval time.Duration `yaml:"health_check_interval"`
 
 	// MaxConcurrent is the maximum active requests accepted by this backend.
+	// 0 means the pool default (64). Negative values are rejected at startup.
 	MaxConcurrent int `yaml:"max_concurrent"`
 }
 

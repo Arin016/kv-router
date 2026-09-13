@@ -23,3 +23,14 @@ func TestNewPoolExposesConfiguredMaxConcurrent(t *testing.T) {
 		t.Fatalf("defaulted MaxConcurrent = %d, want %d", got, DefaultMaxConcurrent)
 	}
 }
+
+// Negative limits are invalid config and must never produce a zero-limit
+// backend: NewPool defaults them defensively for direct callers.
+func TestNewPoolDefaultsNegativeMaxConcurrent(t *testing.T) {
+	pool := NewPool([]BackendConfig{
+		{ID: "neg", URL: "http://localhost:1", CacheCapacityBlocks: 64, MaxConcurrent: -5},
+	})
+	if got := pool.Get("neg").MaxConcurrent(); got != DefaultMaxConcurrent {
+		t.Fatalf("negative MaxConcurrent = %d, want %d", got, DefaultMaxConcurrent)
+	}
+}
