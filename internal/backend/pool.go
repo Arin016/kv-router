@@ -12,6 +12,10 @@ import (
 	"time"
 )
 
+// DefaultMaxConcurrent is the fallback active-request limit applied when a
+// backend is configured with MaxConcurrent <= 0.
+const DefaultMaxConcurrent = 64
+
 // BackendConfig holds the static configuration for a single backend instance.
 type BackendConfig struct {
 	ID                  string
@@ -40,6 +44,12 @@ func (b *Backend) IsHealthy() bool {
 // QueueDepth returns the number of in-flight requests to this backend.
 func (b *Backend) QueueDepth() int64 {
 	return b.queueDepth.Load()
+}
+
+// MaxConcurrent returns the active-request limit enforced by TryReserve.
+// It is always positive for backends built by NewPool.
+func (b *Backend) MaxConcurrent() int {
+	return int(b.maxConcurrent)
 }
 
 // TryReserve atomically reserves capacity for one request. A non-positive
@@ -82,7 +92,7 @@ func NewPool(configs []BackendConfig) *Pool {
 	for _, cfg := range configs {
 		maxConcurrent := cfg.MaxConcurrent
 		if maxConcurrent <= 0 {
-			maxConcurrent = 64
+			maxConcurrent = DefaultMaxConcurrent
 		}
 		b := &Backend{
 			ID:  cfg.ID,

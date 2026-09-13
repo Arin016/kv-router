@@ -78,7 +78,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			ID:            b.ID,
 			MatchedBlocks: matchedBlocks,
 			QueueDepth:    int(b.QueueDepth()),
-			MaxQueueDepth: 64, // reasonable default max concurrent requests
+			MaxQueueDepth: b.MaxConcurrent(),
 			UsedBlocks:    usage.Used,
 			TotalCapacity: usage.Capacity,
 			Healthy:       true, // already filtered
