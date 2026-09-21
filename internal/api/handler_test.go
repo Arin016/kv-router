@@ -110,6 +110,60 @@ func TestReserveRetryFallsThrough(t *testing.T) {
 	}
 }
 
+// abortingStreamBackend streams one SSE chunk (first byte) then kills the
+// connection mid-stream, forcing ForwardStream to return (ttft, err).
+func abortingStreamBackend(t *testing.T) *httptest.Server {
+	t.Helper()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	mux.HandleFunc("/v1/chat/completions", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("data: {\"id\":\"t\"}\n\n"))
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		hj, ok := w.(http.Hijacker)
+		if !ok {
+			t.Error("ResponseWriter does not support hijacking")
+			return
+		}
+		conn, _, err := hj.Hijack()
+		if err != nil {
+			t.Error("hijack failed: ", err)
+			return
+		}
+		_ = conn.Close()
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// TestStreamErrorAfterFirstByteKeepsAffinity is the regression test for
+// issue #7: a stream that errors after first byte (TTFT measured) must still
+// commit the cache-affinity observation — the prefix IS resident.
+func TestStreamErrorAfterFirstByteKeepsAffinity(t *testing.T) {
+	up := abortingStreamBackend(t)
+	s, _ := testServer(t, up.URL)
+
+	hashes := (&tokenizer.BlockHasher{BlockSize: 64}).HashPrefix(
+		[]tokenizer.Message{{Role: "user", Content: "hello"}})
+	if got := s.cache.Lookup("a", "chat:test", hashes); got != 0 {
+		t.Fatalf("expected no affinity before request, got %d", got)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		strings.NewReader(`{"model":"test","messages":[{"role":"user","content":"hello"}],"stream":true}`))
+	rec := httptest.NewRecorder()
+	s.handleChatCompletions(rec, req)
+
+	if got := s.cache.Lookup("a", "chat:test", hashes); got == 0 {
+		t.Fatal("expected affinity committed despite mid-stream error, got 0 matched blocks")
+	}
+}
 // TestAllFullReturns429: every backend at capacity must 429, not 503.
 func TestAllFullReturns429(t *testing.T) {
 	s1 := fakeBackend(t)
