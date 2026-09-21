@@ -12,13 +12,20 @@ import (
 	"time"
 )
 
+// DefaultMaxConcurrent is the fallback active-request limit applied when a
+// backend is configured with MaxConcurrent <= 0.
+const DefaultMaxConcurrent = 64
+
 // BackendConfig holds the static configuration for a single backend instance.
 type BackendConfig struct {
 	ID                  string
 	URL                 string
 	CacheCapacityBlocks int
 	HealthCheckInterval time.Duration
-	MaxConcurrent       int
+	// MaxConcurrent is the maximum active requests accepted by this backend.
+	// 0 means DefaultMaxConcurrent. Negative values are rejected by config
+	// validation and defaulted defensively by NewPool for direct callers.
+	MaxConcurrent int
 }
 
 // Backend represents a single downstream KV-cache inference backend.
@@ -42,8 +49,16 @@ func (b *Backend) QueueDepth() int64 {
 	return b.queueDepth.Load()
 }
 
-// TryReserve atomically reserves capacity for one request. A non-positive
-// limit means the backend is unconstrained.
+// MaxConcurrent returns the active-request limit enforced by TryReserve.
+// It is always positive for backends built by NewPool.
+func (b *Backend) MaxConcurrent() int {
+	return int(b.maxConcurrent)
+}
+
+// TryReserve atomically reserves capacity for one request. Backends built by
+// NewPool always carry a positive limit (0 input means DefaultMaxConcurrent),
+// so TryReserve enforces that limit. A zero-value Backend constructed without
+// NewPool has a non-positive limit and is treated as unconstrained.
 func (b *Backend) TryReserve() bool {
 	for {
 		current := b.queueDepth.Load()
@@ -74,6 +89,9 @@ type Snapshot struct {
 }
 
 // NewPool constructs a Pool from the provided backend configurations.
+// A MaxConcurrent of 0 means DefaultMaxConcurrent; negative values are
+// invalid (rejected by config validation) and defaulted defensively here so
+// direct callers cannot create a zero-limit backend.
 // Each backend starts as healthy; the caller should invoke StartHealthChecks
 // to begin continuous liveness probing.
 func NewPool(configs []BackendConfig) *Pool {
@@ -82,7 +100,7 @@ func NewPool(configs []BackendConfig) *Pool {
 	for _, cfg := range configs {
 		maxConcurrent := cfg.MaxConcurrent
 		if maxConcurrent <= 0 {
-			maxConcurrent = 64
+			maxConcurrent = DefaultMaxConcurrent
 		}
 		b := &Backend{
 			ID:  cfg.ID,

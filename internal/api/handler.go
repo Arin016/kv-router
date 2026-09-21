@@ -78,7 +78,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			ID:            b.ID,
 			MatchedBlocks: matchedBlocks,
 			QueueDepth:    int(b.QueueDepth()),
-			MaxQueueDepth: 64, // reasonable default max concurrent requests
+			MaxQueueDepth: b.MaxConcurrent(),
 			UsedBlocks:    usage.Used,
 			TotalCapacity: usage.Capacity,
 			Healthy:       true, // already filtered
@@ -135,18 +135,21 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 
 	if req.Stream {
 		ttftResult, err := backend.ForwardStream(ctx, selectedBackend, body, r.URL.Path, r.URL.Query(), r.Header, w)
-		if err != nil {
-			slog.Error("backend stream failed", "backend", selectedID, "err", err)
-			// Can't write error if headers already sent; just log.
-			s.recordRoute(req, selectedID, matchesByBackend[selectedID], totalBlocks, selectedScore, selectedState.QueueDepth, http.StatusBadGateway, 0)
-			return
-		}
 		if ttftResult != nil {
+			// First byte arrived: the prompt prefix is resident in this
+			// backend's KV cache whether or not the stream later errored,
+			// so the affinity observation is valid either way (issue #7).
 			s.commitCacheObservation(selectedID, namespace, prefixHashes)
 			slog.Info("TTFT measured",
 				"backend", ttftResult.BackendID,
 				"ttft_ms", ttftResult.TTFT.Milliseconds(),
 			)
+		}
+		if err != nil {
+			slog.Error("backend stream failed", "backend", selectedID, "err", err)
+			// Can't write error if headers already sent; just log.
+			s.recordRoute(req, selectedID, matchesByBackend[selectedID], totalBlocks, selectedScore, selectedState.QueueDepth, http.StatusBadGateway, 0)
+			return
 		}
 		ttftMillis := int64(0)
 		if ttftResult != nil {
@@ -167,6 +170,10 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		backend.CopyHeaders(w.Header(), resp.Header)
 		w.WriteHeader(resp.StatusCode)
 		_, _ = io.Copy(w, resp.Body)
+		// No first-byte signal exists on this path: only <400 proves the
+		// backend accepted and ran the prompt (4xx/5xx may never have
+		// populated KV cache), so unlike the streaming path above this
+		// stays conservative and does not commit on errors (issue #7).
 		if resp.StatusCode < http.StatusBadRequest {
 			s.commitCacheObservation(selectedID, namespace, prefixHashes)
 		}
@@ -179,7 +186,9 @@ func (s *Server) recordRoute(req ChatCompletionRequest, backendID string, matche
 }
 
 // commitCacheObservation updates the local cache model only after upstream
-// evidence shows the request was accepted. Any LRU evictions are immediately
+// evidence shows the request was accepted. For streams, first-byte (TTFT)
+// evidence counts as acceptance: a prefix that produced output is resident
+// even if the stream later fails. Any LRU evictions are immediately
 // removed from the prefix index to avoid advertising stale affinity.
 func (s *Server) commitCacheObservation(backendID, namespace string, hashes []uint64) {
 	s.cache.Commit(backendID, namespace, hashes)
