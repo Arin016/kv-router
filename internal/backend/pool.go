@@ -88,16 +88,29 @@ type Snapshot struct {
 	Inflight int64  `json:"inflight"`
 }
 
-// NewPool constructs a Pool from the provided backend configurations.
+// NewPool constructs a Pool from the provided backend configurations and
+// fails fast on configs that would otherwise only surface at first request:
+// empty or duplicate backend IDs (the backends map is keyed by ID) and
+// non-http(s) URLs (validated with ValidURL).
 // A MaxConcurrent of 0 means DefaultMaxConcurrent; negative values are
 // invalid (rejected by config validation) and defaulted defensively here so
 // direct callers cannot create a zero-limit backend.
-// Each backend starts as healthy; the caller should invoke StartHealthChecks
-// to begin continuous liveness probing.
-func NewPool(configs []BackendConfig) *Pool {
+// Each backend starts unhealthy; it becomes routable after its probe
+// thresholds admit it. The caller should invoke StartHealthChecks to begin
+// continuous liveness probing.
+func NewPool(configs []BackendConfig) (*Pool, error) {
 	backends := make(map[string]*Backend, len(configs))
 	intervals := make(map[string]time.Duration, len(configs))
-	for _, cfg := range configs {
+	for i, cfg := range configs {
+		if cfg.ID == "" {
+			return nil, fmt.Errorf("backend[%d]: id is required", i)
+		}
+		if _, exists := backends[cfg.ID]; exists {
+			return nil, fmt.Errorf("duplicate backend id %q", cfg.ID)
+		}
+		if !ValidURL(cfg.URL) {
+			return nil, fmt.Errorf("backend %q: url %q must be an absolute http(s) URL", cfg.ID, cfg.URL)
+		}
 		maxConcurrent := cfg.MaxConcurrent
 		if maxConcurrent <= 0 {
 			maxConcurrent = DefaultMaxConcurrent
@@ -127,7 +140,7 @@ func NewPool(configs []BackendConfig) *Pool {
 	return &Pool{
 		backends:  backends,
 		intervals: intervals,
-	}
+	}, nil
 }
 
 // Get returns a backend by ID, or nil if not found.

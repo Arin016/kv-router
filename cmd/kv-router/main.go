@@ -68,7 +68,11 @@ func run() int {
 		}
 		cacheDirectory.Register(b.ID, b.CacheCapacityBlocks)
 	}
-	pool := backend.NewPool(poolConfigs)
+	pool, err := backend.NewPool(poolConfigs)
+	if err != nil {
+		slog.Error("invalid backend pool config", "error", err)
+		return 1
+	}
 
 	// --- Initialize scorer ---
 	weights := scorer.Weights{
