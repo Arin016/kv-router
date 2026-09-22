@@ -16,6 +16,17 @@ import (
 // backend is configured with MaxConcurrent <= 0.
 const DefaultMaxConcurrent = 64
 
+const (
+	// unhealthyAfter consecutive failed probes mark a healthy backend
+	// unhealthy, so a single 429/503 spike cannot flap it out (issue #5).
+	unhealthyAfter = 3
+	// healthyAfter consecutive successful probes readmit an unhealthy
+	// backend. StartHealthChecks runs a bootstrap probe burst at startup so
+	// a healthy backend is routable immediately instead of waiting a full
+	// health-check interval (issue #5).
+	healthyAfter = 2
+)
+
 // BackendConfig holds the static configuration for a single backend instance.
 type BackendConfig struct {
 	ID                  string
@@ -37,6 +48,12 @@ type Backend struct {
 	healthy       atomic.Bool
 	queueDepth    atomic.Int64
 	maxConcurrent int64
+
+	// Health hysteresis state and recorded transitions (issue #5).
+	consecutiveFails     atomic.Int32
+	consecutiveSuccesses atomic.Int32
+	healthyTransitions   atomic.Uint64 // unhealthy -> healthy admissions
+	unhealthyTransitions atomic.Uint64 // healthy -> unhealthy removals
 }
 
 // IsHealthy returns the current health status of this backend.
@@ -82,10 +99,12 @@ type Pool struct {
 
 // Snapshot is a safe, immutable view of backend state for routing telemetry.
 type Snapshot struct {
-	ID       string `json:"id"`
-	URL      string `json:"url"`
-	Healthy  bool   `json:"healthy"`
-	Inflight int64  `json:"inflight"`
+	ID                   string `json:"id"`
+	URL                  string `json:"url"`
+	Healthy              bool   `json:"healthy"`
+	Inflight             int64  `json:"inflight"`
+	HealthyTransitions   uint64 `json:"healthy_transitions"`
+	UnhealthyTransitions uint64 `json:"unhealthy_transitions"`
 }
 
 // NewPool constructs a Pool from the provided backend configurations and
@@ -174,7 +193,14 @@ func (p *Pool) Snapshots() []Snapshot {
 	all := p.All()
 	result := make([]Snapshot, 0, len(all))
 	for _, b := range all {
-		result = append(result, Snapshot{ID: b.ID, URL: b.URL, Healthy: b.IsHealthy(), Inflight: b.QueueDepth()})
+		result = append(result, Snapshot{
+			ID:                   b.ID,
+			URL:                  b.URL,
+			Healthy:              b.IsHealthy(),
+			Inflight:             b.QueueDepth(),
+			HealthyTransitions:   b.healthyTransitions.Load(),
+			UnhealthyTransitions: b.unhealthyTransitions.Load(),
+		})
 	}
 	return result
 }
@@ -189,7 +215,12 @@ func (p *Pool) StartHealthChecks(ctx context.Context) {
 		go func() {
 			defer wg.Done()
 			interval := p.intervals[backend.ID]
-			p.probe(backend)
+			// Bootstrap burst: admission needs healthyAfter successes, so
+			// give a healthy backend that many immediate probes to become
+			// routable at cold start without waiting a full interval.
+			for i := 0; i < healthyAfter && !backend.IsHealthy(); i++ {
+				p.probe(backend)
+			}
 			ticker := time.NewTicker(interval)
 			defer ticker.Stop()
 			for {
@@ -219,35 +250,62 @@ func (p *Pool) checkAll() {
 	wg.Wait()
 }
 
-// probe sends a GET to the backend's /health endpoint and updates its
-// healthy flag based on the response status.
+// probe pings the backend's /health endpoint once and applies health
+// hysteresis (issue #5): unhealthyAfter consecutive failures mark a healthy
+// backend unhealthy, healthyAfter consecutive successes readmit it. Every
+// state transition is logged and counted for Snapshot telemetry.
 func (p *Pool) probe(b *Backend) {
+	if err := p.pingOnce(b); err != nil {
+		b.consecutiveSuccesses.Store(0)
+		n := b.consecutiveFails.Add(1)
+		if n >= unhealthyAfter && b.healthy.CompareAndSwap(true, false) {
+			b.unhealthyTransitions.Add(1)
+			slog.Warn("backend marked unhealthy",
+				"backend", b.ID,
+				"consecutive_failures", n,
+				"unhealthy_transitions", b.unhealthyTransitions.Load(),
+				"error", err,
+			)
+			return
+		}
+		slog.Warn("backend health check failed",
+			"backend", b.ID,
+			"consecutive_failures", n,
+			"error", err,
+		)
+		return
+	}
+	b.consecutiveFails.Store(0)
+	n := b.consecutiveSuccesses.Add(1)
+	if n >= healthyAfter && b.healthy.CompareAndSwap(false, true) {
+		b.healthyTransitions.Add(1)
+		slog.Info("backend marked healthy",
+			"backend", b.ID,
+			"consecutive_successes", n,
+			"healthy_transitions", b.healthyTransitions.Load(),
+		)
+	}
+}
+
+// pingOnce probes /health once; nil means the backend answered 2xx.
+func (p *Pool) pingOnce(b *Backend) error {
 	url := fmt.Sprintf("%s/health", b.URL)
 
 	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, url, nil)
 	if err != nil {
-		b.healthy.Store(false)
-		slog.Warn("backend health request could not be built", "backend", b.ID, "error", err)
-		return
+		return fmt.Errorf("build health request: %w", err)
 	}
 
 	resp, err := b.healthClient.Do(req)
 	if err != nil {
-		b.healthy.Store(false)
-		slog.Warn("backend health check failed", "backend", b.ID, "error", err)
-		return
+		return fmt.Errorf("health check failed: %w", err)
 	}
 	defer resp.Body.Close()
 
-	wasHealthy := b.healthy.Load()
-	nowHealthy := resp.StatusCode >= 200 && resp.StatusCode < 300
-	b.healthy.Store(nowHealthy)
-
-	if wasHealthy && !nowHealthy {
-		slog.Warn("backend marked unhealthy", "backend", b.ID, "status", resp.StatusCode)
-	} else if !wasHealthy && nowHealthy {
-		slog.Info("backend marked healthy", "backend", b.ID)
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		return fmt.Errorf("unexpected status %d", resp.StatusCode)
 	}
+	return nil
 }
 
 // ValidURL reports whether the backend URL is safe to use as an HTTP upstream.
