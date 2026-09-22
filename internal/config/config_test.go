@@ -48,3 +48,36 @@ backends:
 		t.Fatal("negative max_concurrent should be rejected at startup")
 	}
 }
+
+// Issue #6: duplicate backend ids must fail fast at config load.
+func TestDuplicateBackendIDRejected(t *testing.T) {
+	path := writeConfig(t, `
+listen_addr: ":8080"
+backends:
+  - id: "a"
+    url: "http://localhost:8001"
+    cache_capacity_blocks: 64
+  - id: "a"
+    url: "http://localhost:8002"
+    cache_capacity_blocks: 64
+`)
+	if _, err := LoadConfig(path); err == nil {
+		t.Fatal("duplicate backend id should be rejected at startup")
+	}
+}
+
+// Issue #6: invalid upstream URLs must fail fast at config load.
+func TestInvalidBackendURLRejected(t *testing.T) {
+	for _, bad := range []string{"localhost:8001", "ftp://backend", ""} {
+		path := writeConfig(t, `
+listen_addr: ":8080"
+backends:
+  - id: "a"
+    url: "`+bad+`"
+    cache_capacity_blocks: 64
+`)
+		if _, err := LoadConfig(path); err == nil {
+			t.Fatalf("url %q should be rejected at startup", bad)
+		}
+	}
+}

@@ -43,7 +43,10 @@ func testServer(t *testing.T, urls ...string) (*Server, []*backend.Backend) {
 			MaxConcurrent:       1,
 		}
 	}
-	pool := backend.NewPool(cfgs)
+	pool, err := backend.NewPool(cfgs)
+	if err != nil {
+		t.Fatalf("NewPool: %v", err)
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	go pool.StartHealthChecks(ctx)
@@ -164,6 +167,7 @@ func TestStreamErrorAfterFirstByteKeepsAffinity(t *testing.T) {
 		t.Fatal("expected affinity committed despite mid-stream error, got 0 matched blocks")
 	}
 }
+
 // TestAllFullReturns429: every backend at capacity must 429, not 503.
 func TestAllFullReturns429(t *testing.T) {
 	s1 := fakeBackend(t)
